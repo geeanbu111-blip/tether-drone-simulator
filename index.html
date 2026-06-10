@@ -78,6 +78,7 @@ body{background:#0a0c10;color:#e8eaf0;font-family:'Segoe UI',monospace;overflow:
   <button class="mode-btn" onclick="setWind(5)">5 m/s</button>
   <button class="mode-btn active" onclick="setWind(10)">10 m/s</button>
   <button class="mode-btn" onclick="setWind(20)">20 m/s</button>
+  <button id="log-btn" onclick="exportLog()" style="padding:4px 10px;border-radius:4px;border:1px solid #374151;background:#1a2433;color:#93c5fd;font-size:11px;font-weight:700;cursor:pointer" title="Download flight log as CSV">⬇ LOG (0)</button>
   <button id="arm-btn" onclick="toggleArm()">DISARMED — PRESS TO ARM</button>
 </div>
 
@@ -268,6 +269,9 @@ const state = {
   totalPower: 0,
   tetherTension: 0,
   rtlLanding: false,
+  log: [],            // black-box recorder rows
+  logTimer: 0,
+  lastEvent: '',
   // Alerts queue
   alerts: [],
   lastAlert: {},
@@ -534,7 +538,7 @@ function update(dt){
   const thr2 = state.thr**2;
   state.totalPower = state.thr * D.T_total_max / D.T_max_alt *
                      D.P_max_motor * D.n_rotors * 0.35 + 200;
-  if(state.armed) state.flightTime+=dt;
+  if(state.armed){ state.flightTime+=dt; recordSample(dt); }
 
   // Tether tension
   const dep3d = Math.sqrt(state.x**2+state.y**2+state.z**2);
@@ -580,7 +584,7 @@ resize();
 function drawScene(){
   const W=canvas.width, H=canvas.height;
   ctx.clearRect(0,0,W,H);
-  ctx.fillStyle='#b8c9a8';
+  ctx.fillStyle='#7d7050';
   ctx.fillRect(0,0,W,H);
 
   const split=H*0.55;  // top portion = top-down, bottom = side view
@@ -597,7 +601,7 @@ function drawScene(){
   ctx.beginPath(); ctx.moveTo(0,split); ctx.lineTo(W,split); ctx.stroke();
 
   // Labels
-  ctx.fillStyle='#2d3a2d';
+  ctx.fillStyle='#f3e2c8';
   ctx.font='bold 10px Segoe UI';
   ctx.fillText('TOP VIEW (XY)',8,split-6);
   ctx.fillStyle='#ffffffcc';
@@ -611,11 +615,11 @@ function drawTopDown(ox,oy,w,h){
   ctx.save();
   ctx.beginPath(); ctx.rect(ox,oy,w,h); ctx.clip();
 
-  // Alpine meadow terrain (satellite-map style)
-  const terr=ctx.createRadialGradient(cx,cy,20,cx,cy,Math.max(w,h)*0.7);
-  terr.addColorStop(0,'#9db380');   // grass near the pad
-  terr.addColorStop(0.6,'#8aa06e');
-  terr.addColorStop(1,'#7d9163');   // darker meadow at edges
+  // Alpine meadow at dusk — warm low light from the west
+  const terr=ctx.createRadialGradient(cx-w*0.25,cy-h*0.15,20,cx,cy,Math.max(w,h)*0.75);
+  terr.addColorStop(0,'#9c8a62');   // sunlit warm grass
+  terr.addColorStop(0.55,'#7d7050');
+  terr.addColorStop(1,'#5d5340');   // falling into shadow at the edges
   ctx.fillStyle=terr;
   ctx.fillRect(ox,oy,w,h);
   // Scattered rock/scrub patches (deterministic)
@@ -624,18 +628,20 @@ function drawTopDown(ox,oy,w,h){
     const px2=cx+Math.cos(a)*r2*1.7, py2=cy+Math.sin(a)*r2;
     ctx.beginPath();
     ctx.ellipse(px2,py2,8+(i*13%14),5+(i*7%9),a,0,Math.PI*2);
-    ctx.fillStyle=(i%3===0)?'#8c9a7044':(i%3===1)?'#a3b28a55':'#74855c44';
+    ctx.fillStyle=(i%3===0)?'#6f624a44':(i%3===1)?'#a8915f55':'#564c3a44';
     ctx.fill();
   }
   // Dirt access track to the pad
-  ctx.strokeStyle='#a89a7c88'; ctx.lineWidth=7; ctx.lineCap='round';
+  ctx.strokeStyle='#b09a6f88'; ctx.lineWidth=7; ctx.lineCap='round';
   ctx.beginPath(); ctx.moveTo(ox-5,cy+h*0.38);
   ctx.quadraticCurveTo(cx-w*0.2,cy+h*0.3,cx-12,cy+8); ctx.stroke();
   ctx.lineCap='butt';
-  // Concrete landing pad with H marking
-  ctx.fillStyle='#b9bdb6';
+  // Concrete landing pad with H marking (long shadow eastward)
+  ctx.fillStyle='#00000030';
+  ctx.beginPath(); ctx.ellipse(cx+24,cy+5,22,9,0.15,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#c4b9a4';
   ctx.beginPath(); ctx.arc(cx,cy,16,0,Math.PI*2); ctx.fill();
-  ctx.strokeStyle='#8e948c'; ctx.lineWidth=1.5; ctx.stroke();
+  ctx.strokeStyle='#8e8270'; ctx.lineWidth=1.5; ctx.stroke();
   ctx.strokeStyle='#e8b80999'; ctx.lineWidth=2.5;
   ctx.beginPath(); ctx.moveTo(cx-6,cy-7); ctx.lineTo(cx-6,cy+7);
   ctx.moveTo(cx+6,cy-7); ctx.lineTo(cx+6,cy+7);
@@ -660,10 +666,10 @@ function drawTopDown(ox,oy,w,h){
   for(const r of [15,30,50,100,120]){
     ctx.beginPath();
     ctx.arc(cx,cy,r*scale,0,Math.PI*2);
-    ctx.strokeStyle = r===15?'#1d4ed855':r===120?'#b91c1c66':'#00000022';
+    ctx.strokeStyle = r===15?'#93c5fd66':r===120?'#f8717166':'#00000026';
     ctx.lineWidth=1;
     ctx.stroke();
-    ctx.fillStyle='#3f4a3f';
+    ctx.fillStyle='#f3e2c8cc';
     ctx.font='9px Segoe UI';
     ctx.fillText(r+'m',cx+r*scale+2,cy-2);
   }
@@ -681,7 +687,7 @@ function drawTopDown(ox,oy,w,h){
   ctx.fillStyle='#5b6470';
   ctx.fillRect(cx+18,cy-5,10,10);
   ctx.strokeStyle='#3a4048'; ctx.lineWidth=1; ctx.strokeRect(cx+18,cy-5,10,10);
-  ctx.fillStyle='#2d3a2d';
+  ctx.fillStyle='#f3e2c8';
   ctx.font='9px Segoe UI';
   ctx.fillText('WINCH',cx+18,cy+16);
 
@@ -697,6 +703,20 @@ function drawTopDown(ox,oy,w,h){
   ctx.lineWidth=2;
   ctx.stroke();
   ctx.restore();
+
+  // Flight path trail (from black-box recorder)
+  if(state.log.length>1){
+    ctx.beginPath();
+    const start=Math.max(0,state.log.length-600);
+    for(let i=start;i<state.log.length;i++){
+      const lx=cx+parseFloat(state.log[i][3])*scale;
+      const ly=cy-parseFloat(state.log[i][4])*scale;
+      if(i===start) ctx.moveTo(lx,ly); else ctx.lineTo(lx,ly);
+    }
+    ctx.strokeStyle='#dc262655';
+    ctx.lineWidth=1.5;
+    ctx.stroke();
+  }
 
   // Tether line (top view projection)
   const dx=state.x*scale, dy=state.y*scale;
@@ -749,14 +769,14 @@ function drawTopDown(ox,oy,w,h){
     ctx.stroke();
 
     // Alt badge
-    ctx.fillStyle='#143d8f';
+    ctx.fillStyle='#ffffff';
     ctx.font='bold 10px Segoe UI';
     ctx.fillText(state.z.toFixed(1)+'m',px+14,py-4);
 
     // Drift badge
     const drift2d=Math.sqrt(state.x**2+state.y**2);
     if(drift2d>2){
-      ctx.fillStyle='#92400e';
+      ctx.fillStyle='#fcd34d';
       ctx.fillText(drift2d.toFixed(1)+'m drift',px+14,py+8);
     }
   }
@@ -771,26 +791,31 @@ function drawSideView(ox,oy,w,h){
   ctx.save();
   ctx.beginPath(); ctx.rect(ox,oy,w,h); ctx.clip();
 
-  // High-altitude daytime sky (deeper blue up high, pale at horizon)
+  // Dusk sky — indigo overhead through rose to a golden horizon
   const grd=ctx.createLinearGradient(0,oy,0,groundY);
-  grd.addColorStop(0,'#2563ab');
-  grd.addColorStop(0.55,'#5b94cf');
-  grd.addColorStop(1,'#b9d4ea');
+  grd.addColorStop(0,'#2b2150');
+  grd.addColorStop(0.35,'#6e4a78');
+  grd.addColorStop(0.65,'#c96a6a');
+  grd.addColorStop(0.85,'#ef9c5a');
+  grd.addColorStop(1,'#f7c878');
   ctx.fillStyle=grd;
   ctx.fillRect(ox,oy,w,groundY-oy);
 
-  // Sun with glow
-  const sunX=ox+w*0.82, sunY=oy+28;
-  const sg=ctx.createRadialGradient(sunX,sunY,4,sunX,sunY,40);
-  sg.addColorStop(0,'#fff8d0');
-  sg.addColorStop(0.25,'#ffe98a');
-  sg.addColorStop(1,'#ffe98a00');
+  // Low golden sun, sitting just above the mountain line
+  const sunX=ox+w*0.78, sunY=groundY-(groundY-oy)*0.40;
+  const sg=ctx.createRadialGradient(sunX,sunY,6,sunX,sunY,90);
+  sg.addColorStop(0,'#fff3c4');
+  sg.addColorStop(0.12,'#ffd27a');
+  sg.addColorStop(0.4,'#ff9e4f44');
+  sg.addColorStop(1,'#ff9e4f00');
   ctx.fillStyle=sg;
-  ctx.beginPath(); ctx.arc(sunX,sunY,40,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(sunX,sunY,90,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#ffe9b3';
+  ctx.beginPath(); ctx.arc(sunX,sunY,13,0,Math.PI*2); ctx.fill();
 
-  // Drifting clouds (move slowly with wind)
+  // Drifting clouds, underlit pink-orange
   const cOff=(state.flightTime!==undefined?state.flightTime:0)*3 % (w+240);
-  ctx.fillStyle='#ffffffbb';
+  ctx.fillStyle='#f4b08baa';
   for(const c of [[0.15,0.18,46,11],[0.45,0.30,64,13],[0.75,0.12,38,9],[0.05,0.42,52,10]]){
     const cxp=ox+((c[0]*w+cOff)%(w+240))-120, cyp=oy+(groundY-oy)*c[1];
     ctx.beginPath();
@@ -808,8 +833,8 @@ function drawSideView(ox,oy,w,h){
     ctx.lineTo(mx,groundY-mh);
   }
   ctx.lineTo(ox+w,groundY); ctx.closePath();
-  ctx.fillStyle='#7d93ad'; ctx.fill();
-  // Snow caps on far range
+  ctx.fillStyle='#4a3b63'; ctx.fill();
+  // Sunlit warm rim on far peaks
   for(let i=0;i<=12;i++){
     const mx=ox+i*w/12;
     const mh=(groundY-oy)*(0.30+0.16*Math.abs(Math.sin(i*2.3+1)));
@@ -819,10 +844,10 @@ function drawSideView(ox,oy,w,h){
       ctx.lineTo(mx,groundY-mh);
       ctx.lineTo(mx+14,groundY-mh+12);
       ctx.closePath();
-      ctx.fillStyle='#eef4f9'; ctx.fill();
+      ctx.fillStyle='#f3c08e'; ctx.fill();
     }
   }
-  // Nearer ridge (darker)
+  // Nearer ridge (dark silhouette against the glow)
   ctx.beginPath(); ctx.moveTo(ox,groundY);
   for(let i=0;i<=8;i++){
     const mx=ox+i*w/8;
@@ -830,24 +855,30 @@ function drawSideView(ox,oy,w,h){
     ctx.lineTo(mx,groundY-mh);
   }
   ctx.lineTo(ox+w,groundY); ctx.closePath();
-  ctx.fillStyle='#5e7257'; ctx.fill();
+  ctx.fillStyle='#36304a'; ctx.fill();
 
-  // Ground (rocky plateau soil)
+  // Ground (plateau in evening shadow, warm at the horizon line)
   const gg=ctx.createLinearGradient(0,groundY,0,oy+h);
-  gg.addColorStop(0,'#8a9a6e');
-  gg.addColorStop(1,'#6e6049');
+  gg.addColorStop(0,'#6b5a44');
+  gg.addColorStop(1,'#3a3128');
   ctx.fillStyle=gg;
   ctx.fillRect(ox,groundY,w,h-groundY+oy);
-  ctx.strokeStyle='#55604455';
+  ctx.strokeStyle='#f7c87855';
   ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(ox,groundY);ctx.lineTo(ox+w,groundY);ctx.stroke();
-  // Landing pad + winch hut at centre
+  // Landing pad + winch hut at centre, with long evening shadows
   const padX=ox+w/2;
-  ctx.fillStyle='#b9bdb6'; ctx.fillRect(padX-22,groundY-3,44,5);
-  ctx.fillStyle='#5b6470'; ctx.fillRect(padX+26,groundY-10,14,10);
-  ctx.fillStyle='#434b56'; ctx.beginPath();
+  ctx.fillStyle='#00000033';
+  ctx.beginPath(); ctx.ellipse(padX-38,groundY+4,34,3,0,0,Math.PI*2); ctx.fill();   // pad shadow cast away from sun
+  ctx.beginPath(); ctx.ellipse(padX-2,groundY+5,26,3,0,0,Math.PI*2); ctx.fill();    // hut shadow
+  ctx.fillStyle='#c9bda6'; ctx.fillRect(padX-22,groundY-3,44,5);
+  ctx.fillStyle='#4e4a5c'; ctx.fillRect(padX+26,groundY-10,14,10);
+  ctx.fillStyle='#3a3648'; ctx.beginPath();
   ctx.moveTo(padX+24,groundY-10); ctx.lineTo(padX+33,groundY-16); ctx.lineTo(padX+42,groundY-10);
   ctx.closePath(); ctx.fill();
+  // Warm sun glint on the hut roof edge
+  ctx.strokeStyle='#ffd27a88'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(padX+33,groundY-16); ctx.lineTo(padX+42,groundY-10); ctx.stroke();
 
   // Alt grid lines
   ctx.strokeStyle='#ffffff26'; ctx.lineWidth=1;
@@ -873,7 +904,7 @@ function drawSideView(ox,oy,w,h){
   ctx.fillText('TARGET 100m',ox+w-90,groundY-100*scaleZ-3);
 
   // LAMV ground elevation label
-  ctx.fillStyle='#2d3320';
+  ctx.fillStyle='#f7c878cc';
   ctx.fillText('4,000 m AMSL',ox+3,groundY+12);
 
   if(state.armed||state.z>0){
@@ -1073,6 +1104,44 @@ function addLog(msg){
             t.getMinutes().toString().padStart(2,'0')+':'+
             t.getSeconds().toString().padStart(2,'0');
   log.innerHTML=`<div>[${ts}] ${msg}</div>`+log.innerHTML;
+  state.lastEvent=msg;   // tagged onto the next black-box row
+}
+
+// ═══════════════════════════════════════════
+// BLACK-BOX FLIGHT RECORDER
+// ═══════════════════════════════════════════
+function recordSample(dt){
+  state.logTimer+=dt;
+  if(state.logTimer<0.2) return;          // 5 Hz sampling
+  state.logTimer=0;
+  const drift=Math.sqrt(state.x**2+state.y**2);
+  const tLen=Math.sqrt(state.x**2+state.y**2+state.z**2);
+  state.log.push([
+    state.flightTime.toFixed(2), state.mode, state.armed?1:0,
+    state.x.toFixed(2), state.y.toFixed(2), state.z.toFixed(2),
+    state.vx.toFixed(2), state.vy.toFixed(2), state.vz.toFixed(2),
+    state.roll.toFixed(1), state.pitch.toFixed(1), state.yaw.toFixed(1),
+    (state.thr*100).toFixed(1), state.totalPower.toFixed(0),
+    tLen.toFixed(1), state.tetherTension.toFixed(0), drift.toFixed(2),
+    state.windSpeed, state.tetherCut?1:0,
+    '"'+state.lastEvent.replace(/"/g,"'")+'"'
+  ]);
+  state.lastEvent='';
+  const lb=document.getElementById('log-btn');
+  if(lb) lb.textContent='⬇ LOG ('+state.log.length+')';
+}
+
+function exportLog(){
+  if(state.log.length===0){ addAlert('No flight data recorded yet — fly first!','warning'); return; }
+  const header='time_s,mode,armed,x_m,y_m,alt_agl_m,vx_mps,vy_mps,vz_mps,roll_deg,pitch_deg,yaw_deg,throttle_pct,power_W,tether_deployed_m,tether_tension_N,drift_m,wind_mps,tether_cut,event';
+  const csv=header+'\n'+state.log.map(r=>r.join(',')).join('\n');
+  const blob=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  const d=new Date();
+  a.download='flight_log_'+d.toISOString().slice(0,19).replace(/[:T]/g,'-')+'.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  addLog('💾 Flight log exported ('+state.log.length+' samples)');
 }
 
 // ═══════════════════════════════════════════
